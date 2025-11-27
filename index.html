@@ -157,10 +157,11 @@
 
     <script>
         // --- Configuration & Endpoints ---
-        // CoinGecko API Endpoints
+        // CoinGecko API Endpoints for Price (used for real-time stats)
         const PRICE_API_ENDPOINT = 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_high=true&include_24hr_low=true';
-        // OHLC endpoint for 180 days of historical data
-        const CHART_API_ENDPOINT = 'https://api.coingecko.com/api/v3/coins/bitcoin/ohlc?vs_currency=usd&days=180';
+        // Binance API Endpoint for OHLC (used for historical chart data - less prone to CORS errors)
+        // Fetches 180 days (limit=180) of 1-day interval (interval=1d) data for BTCUSDT.
+        const CHART_API_ENDPOINT = 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=180';
 
         // --- Utilities ---
         const formatCurrency = (num) => {
@@ -186,12 +187,14 @@
                 try {
                     const response = await fetch(url);
                     if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
+                        // Throw error to trigger catch block
+                        throw new Error(`HTTP error! status: ${response.status} from ${url}`);
                     }
                     return await response.json();
                 } catch (error) {
                     if (i === maxRetries - 1) {
-                        throw error; // Throw if it's the last attempt
+                        // Re-throw the final error if max retries reached
+                        throw error; 
                     }
                     const delay = initialDelay * Math.pow(2, i);
                     // console.log(`Fetch failed for ${url}. Retrying in ${delay}ms...`);
@@ -203,7 +206,7 @@
 
         // --- Data Logic (API) ---
         
-        // Mock News Data (Still required as CoinGecko simple API doesn't provide news)
+        // Mock News Data (Still required as the primary API doesn't provide news)
         const newsData = [
             { title: "贝莱德现货比特币 ETF 交易量再创新高", desc: "随着机构投资者兴趣的持续升温，IBIT 昨日交易量突破历史记录，华尔街对加密资产的配置正在加速。", time: "15分钟前", tag: "机构动向", sentiment: "up" },
             { title: "美联储暗示降息周期临近，比特币突破关键阻力位", desc: "最新的 FOMC 会议纪要显示，通胀数据放缓可能促使美联储在下个季度开始降息，风险资产普涨。", time: "1小时前", tag: "宏观经济", sentiment: "up" },
@@ -285,16 +288,23 @@
 
         async function updateDashboard() {
             try {
-                // 1. Fetch Price - 使用指数退避策略尝试获取实时价格
+                // 1. Fetch Price - 使用 CoinGecko 获取实时价格和 24H 统计数据
                 const priceData = await fetchWithRetry(PRICE_API_ENDPOINT);
                 
                 const btc = priceData.bitcoin;
                 
                 // 使用 API 数据
                 const currentPrice = btc.usd;
+                // 确保即使 API 缺失字段，我们也有 null/undefined 来触发 formatCurrency 返回 'N/A'
                 const high24h = btc.usd_24h_high;
                 const low24h = btc.usd_24h_low;
                 const changeValue = btc.usd_24h_change;
+
+                // --- DEBUG LOGS: Check the fetched values ---
+                console.log("CoinGecko API Response (BTC):", btc);
+                console.log("24H High (usd_24h_high):", high24h);
+                console.log("24H Low (usd_24h_low):", low24h);
+                // -------------------------------------------
 
                 // Update DOM
                 const currentPriceEl = document.getElementById('btc-price');
@@ -317,6 +327,7 @@
                 changeEl.className = `px-2 py-1 rounded text-sm font-bold ${changeValue >= 0 ? 'bg-green-900 text-green-400' : 'bg-red-900 text-red-400'}`;
 
                 // Use API values for high/low
+                // 如果值缺失，formatCurrency 会返回 'N/A'
                 document.getElementById('high-24h').innerText = '$' + formatCurrency(high24h);
                 document.getElementById('low-24h').innerText = '$' + formatCurrency(low24h);
 
@@ -341,13 +352,19 @@
             chartEl.innerHTML = '<div class="text-center py-20 text-gray-400">正在加载真实历史K线数据...</div>';
 
             try {
-                // 1. Fetch historical OHLC data
-                const ohlcData = await fetchWithRetry(CHART_API_ENDPOINT, 3); // Fewer retries for heavy chart data
+                // 1. Fetch historical OHLC data from Binance API
+                const ohlcData = await fetchWithRetry(CHART_API_ENDPOINT, 3); 
                 
-                // 2. Map data to ApexCharts format: [timestamp, open, high, low, close] -> {x, y:[o,h,l,c]}
+                // 2. Map Binance data to ApexCharts format:
+                // Binance array format: [timestamp, open, high, low, close, ...]
                 const seriesData = ohlcData.map(item => ({
-                    x: new Date(item[0]), // Timestamp
-                    y: [item[1].toFixed(2), item[2].toFixed(2), item[3].toFixed(2), item[4].toFixed(2)] // OHLC values
+                    x: item[0], // Timestamp (ms)
+                    y: [
+                        parseFloat(item[1]).toFixed(2), // Open
+                        parseFloat(item[2]).toFixed(2), // High
+                        parseFloat(item[3]).toFixed(2), // Low
+                        parseFloat(item[4]).toFixed(2)  // Close
+                    ]
                 }));
 
                 // 3. Render chart
@@ -355,13 +372,13 @@
                 initChart(seriesData);
 
                 // 4. Update title
-                chartTitleEl.innerText = 'BTC/USDT 近半年 K线图 (真实数据)';
+                chartTitleEl.innerText = 'BTC/USDT 近半年 K线图 (数据源: 币安 API)';
 
             } catch (error) {
                 // 5. Fallback to Error State
                 console.error("无法获取真实历史K线数据，请检查网络或API状态。", error);
                 chartTitleEl.innerText = 'BTC/USDT K线图 (数据加载失败)';
-                chartEl.innerHTML = '<div class="text-center py-20 text-red-400">🚨 无法加载真实 K 线数据。请检查 API 状态。</div>';
+                chartEl.innerHTML = '<div class="text-center py-20 text-red-400">🚨 K 线数据加载失败。已切换数据源，请重试部署。</div>';
             }
         }
 
